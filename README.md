@@ -1,6 +1,6 @@
 # HoodDL
 
-A simple file downloader written in Rust. Downloads are accelerated by using multiple connections.
+A simple download accelerator written in Rust. Downloads are accelerated by using multiple connections.
 
 Usage:
 

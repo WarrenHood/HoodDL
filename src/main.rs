@@ -30,7 +30,7 @@ struct Args {
     #[arg(short, long)]
     cookies: Vec<String>,
 
-    /// Size of chunk (in bytes) to download at a time per connection. Defaults to 8388608 (8 MB)
+    /// Size of chunk (in bytes) to download at a time per connection
     #[arg(short, long, default_value_t = 8388608)]
     segment_chunk_size: u64,
 }

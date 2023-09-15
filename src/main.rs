@@ -1,13 +1,17 @@
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Result;
 use clap::Parser;
+use itertools::Itertools;
 use reqwest::cookie;
 use smart_default::SmartDefault;
 use tokio::{
     io::{AsyncSeekExt, AsyncWriteExt},
-    sync::Mutex,
+    sync::{
+        mpsc::{self, Receiver, Sender},
+        Mutex,
+    },
 };
 
 /// File downloader supporting multiple connections
@@ -53,6 +57,19 @@ struct FileSegmentDownloader {
     options: DownloadOptions,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ProgressManagerCommand {
+    UpdateProgress(SegmentDownloadProgess),
+    Stop,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SegmentDownloadProgess {
+    offset: u64,
+    size: u64,
+    progress: u64,
+}
+
 impl FileSegmentDownloader {
     pub fn new(
         filename: &str,
@@ -82,16 +99,19 @@ impl FileSegmentDownloader {
         }
     }
 
-    pub async fn download(&mut self, progress_bar: Option<ProgressBar>) -> Result<()> {
+    pub async fn download(
+        &mut self,
+        progress_bar: Option<ProgressBar>,
+        tx: Sender<ProgressManagerCommand>,
+    ) -> Result<()> {
+        if self.size == 0 {
+            return Err(anyhow::format_err!("Cannot download zero-length segment"));
+        }
         // Open up the file, and seek to the start pos
         let start_pos = self.offset + self.progress;
         let end_pos = self.offset + self.size - 1;
-        if start_pos >= end_pos {
-            // We are already done
-            println!("Segment download {}-{} already done", self.offset, end_pos);
-            return Ok(());
-        }
         if let Some(progress_bar) = &progress_bar {
+            progress_bar.set_position(self.progress);
             progress_bar.tick();
         }
 
@@ -116,6 +136,10 @@ impl FileSegmentDownloader {
 
         let chunks = (start_pos..=end_pos).step_by(self.options.chunk_size as usize);
         for chunk_start in chunks {
+            if chunk_start < self.progress {
+                // If we are resuming downloads, we can skip the chunks we already have
+                continue;
+            }
             let chunk_end = (chunk_start + self.options.chunk_size - 1).clamp(0, end_pos);
             if let Ok(chunk_response) = client
                 .get(&self.url)
@@ -131,8 +155,25 @@ impl FileSegmentDownloader {
                 file.write(&chunk_bytes).await?;
                 file.flush().await?;
                 self.progress += chunk_bytes.len() as u64;
+                if let Err(err) = tx
+                    .send(ProgressManagerCommand::UpdateProgress(
+                        SegmentDownloadProgess {
+                            offset: self.offset,
+                            size: self.size,
+                            progress: self.progress,
+                        },
+                    ))
+                    .await
+                {
+                    eprintln!(
+                        "Failed to send progress update for segment {}-{}: {:?}",
+                        self.offset,
+                        self.offset + self.size - 1,
+                        err
+                    );
+                }
                 if let Some(pb) = &progress_bar {
-                    pb.inc(chunk_bytes.len() as u64);
+                    pb.set_position(self.progress);
                 }
             }
         }
@@ -145,6 +186,72 @@ impl FileSegmentDownloader {
         }
         Ok(())
     }
+}
+
+async fn handle_segment_download_progress(
+    filename: String,
+    initial_progress: HashMap<u64, SegmentDownloadProgess>,
+    mut rx: Receiver<ProgressManagerCommand>,
+) {
+    let progress_filename = format!("{}.dlprogress", filename);
+    let mut current_progress = initial_progress;
+    while let Some(command) = rx.recv().await {
+        match command {
+            ProgressManagerCommand::UpdateProgress(new_progress) => {
+                // Got new progress update for a segment
+                current_progress.insert(new_progress.offset, new_progress);
+                let sorted_offsets = current_progress.keys().into_iter().sorted();
+                let progress = sorted_offsets
+                    .map(|k| current_progress.get(k).unwrap())
+                    .map(|prog| format!("{} {} {}", prog.offset, prog.size, prog.progress))
+                    .join("\n");
+                if let Err(err) = std::fs::write(&progress_filename, &progress) {
+                    eprintln!(
+                        "An error occurred while saving download progress for {}: {:?}",
+                        &filename, err
+                    );
+                }
+            }
+            ProgressManagerCommand::Stop => {
+                break;
+            }
+        }
+    }
+}
+
+fn get_progress(filename: &str) -> HashMap<u64, SegmentDownloadProgess> {
+    let mut progress: HashMap<u64, SegmentDownloadProgess> = HashMap::new();
+    let progress_filename = format!("{}.dlprogress", filename);
+    for line in std::fs::read_to_string(progress_filename)
+        .unwrap_or(String::new())
+        .lines()
+    {
+        let line_parsed = line
+            .trim()
+            .split(" ")
+            .map(|w| w.trim().parse::<u64>())
+            .collect_vec();
+        if line_parsed.len() != 3
+            || line_parsed[0].is_err()
+            || line_parsed[1].is_err()
+            || line_parsed[2].is_err()
+        {
+            eprintln!(
+                "Found unexpected line reading download progress of file {}: {}",
+                &filename, &line
+            );
+            continue;
+        }
+        progress.insert(
+            line_parsed[0].clone().unwrap(),
+            SegmentDownloadProgess {
+                offset: line_parsed[0].clone().unwrap(),
+                size: line_parsed[1].clone().unwrap(),
+                progress: line_parsed[2].clone().unwrap(),
+            },
+        );
+    }
+    progress
 }
 
 async fn download_file(
@@ -172,38 +279,89 @@ async fn download_file(
         .build()?;
 
     let response = client.head(url).send().await?;
+    if response
+        .headers()
+        .get(reqwest::header::ACCEPT_RANGES)
+        .unwrap_or(&reqwest::header::HeaderValue::from_static("none"))
+        == "none"
+    {
+        return Err(anyhow::format_err!("Server doesn't seem to support partial requests (Accept-Ranges missing from headers). Aborting..."));
+    }
     if let Some(content_length) = response.headers().get(reqwest::header::CONTENT_LENGTH) {
         let content_length: u64 = content_length.to_str()?.parse()?;
-        println!(
-            "Starting download of file {}, connections={}, size is {} bytes",
-            filename, connections, content_length
-        );
-        let mut file = tokio::fs::File::options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&filename)
-            .await?;
+        let (tx, rx) = mpsc::channel::<ProgressManagerCommand>(connections as usize);
+        let mut progress = get_progress(&filename);
+        let mut is_resumed = false;
+        if progress.len() as u64 == connections {
+            is_resumed = true;
+            println!("Resuming download for file {}", &filename);
+        } else {
+            println!(
+                "Starting download of file {}, connections={}, size is {} bytes",
+                filename, connections, content_length
+            );
+            let _ = std::fs::remove_file(format!("{}.dlprogress", filename));
+            let mut file = tokio::fs::File::options()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(&filename)
+                .await?;
 
-        file.seek(std::io::SeekFrom::Start(content_length - 1))
-            .await?;
-        file.write(&[0]).await?;
-        file.flush().await?;
+            file.seek(std::io::SeekFrom::Start(content_length - 1))
+                .await?;
+            file.write(&[0]).await?;
+            file.flush().await?;
+        }
 
-        let segment_size = content_length / connections;
+        let segment_size = (content_length as f64 / connections as f64).ceil() as u64;
         let segments = (0..=content_length - 1).step_by(segment_size as usize);
         let mut downloaders = Vec::new();
         for segment_start in segments {
             let segment_end = (segment_start + segment_size - 1).clamp(0, content_length - 1);
-            downloaders.push(Arc::new(Mutex::new(FileSegmentDownloader::new(
-                filename,
-                url,
-                segment_start,
-                segment_end - segment_start + 1,
-                options,
-            ))));
+            if is_resumed {
+                downloaders.push(Arc::new(Mutex::new(
+                    FileSegmentDownloader::new_with_progress(
+                        filename,
+                        url,
+                        segment_start,
+                        segment_end - segment_start + 1,
+                        progress
+                            .get(&segment_start)
+                            .expect(
+                                &format!(
+                                    "Existing progress does not contain segment offset {}",
+                                    &segment_start
+                                )
+                                .to_string(),
+                            )
+                            .progress,
+                        options,
+                    ),
+                )));
+            } else {
+                progress.insert(
+                    segment_start,
+                    SegmentDownloadProgess {
+                        offset: segment_start,
+                        size: segment_end - segment_start + 1,
+                        progress: 0,
+                    },
+                );
+                downloaders.push(Arc::new(Mutex::new(FileSegmentDownloader::new(
+                    filename,
+                    url,
+                    segment_start,
+                    segment_end - segment_start + 1,
+                    options,
+                ))));
+            }
         }
-
+        let progress_manager = tokio::spawn(handle_segment_download_progress(
+            filename.into(),
+            progress.clone(),
+            rx,
+        ));
         let progress_bars = indicatif::MultiProgress::new();
         progress_bars.set_draw_target(ProgressDrawTarget::stderr());
         let mut downloader_handles = Vec::new();
@@ -220,8 +378,9 @@ async fn download_file(
             let pb = progress_bars
                 .add(ProgressBar::new(downloader.lock().await.size).with_message(pb_message));
             pb.set_style(ProgressStyle::with_template("{msg} {spinner:.green} [{elapsed_precise}] [{wide_bar:.green}] {bytes}/{total_bytes} ETA {eta}").unwrap());
+            let tx = tx.clone();
             downloader_handles.push(tokio::task::spawn(async move {
-                downloader.lock().await.download(Some(pb)).await
+                downloader.lock().await.download(Some(pb), tx).await
             }));
         }
 
@@ -242,8 +401,16 @@ async fn download_file(
                 return Err(anyhow::format_err!("Download failed"));
             }
         }
+        if tx.send(ProgressManagerCommand::Stop).await.is_ok() {
+            let _ = progress_manager.await;
+        }
+    } else {
+        // Can't get content-length. Not supported
+        return Err(anyhow::format_err!(
+            "Couldn't get content length. Aborting..."
+        ));
     }
-
+    let _ = std::fs::remove_file(format!("{}.dlprogress", filename));
     Ok(())
 }
 

@@ -1,6 +1,14 @@
 # HoodDL
 
-A simple download accelerator written in Rust. Downloads are accelerated by using multiple connections.
+A simple, blazingly fast download accelerator (written in Rust).
+
+## Features
+
+- Configurable number of connections to be used when downloading files.
+- File is split into segments. All segments are downloaded concurrently (1 segment per connection)
+- Cancelled/failed downloads can be resumed if you specify the same number of connections as in the previous attempt.
+- Setting cookies
+- Configurable download chunk size in bytes for each connection (defaults to 8388608 bytes ie. 8MB)
 
 Usage:
 

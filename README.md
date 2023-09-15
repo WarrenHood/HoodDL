@@ -1,3 +1,4 @@
+[![Build](https://github.com/WarrenHood/HoodDL/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/WarrenHood/HoodDL/actions/workflows/build.yml)
 # HoodDL
 
 A simple, blazingly fast download accelerator (written in Rust).

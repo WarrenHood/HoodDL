@@ -59,12 +59,12 @@ struct FileSegmentDownloader {
 
 #[derive(Debug, Clone, Copy)]
 enum ProgressManagerCommand {
-    UpdateProgress(SegmentDownloadProgess),
+    UpdateProgress(SegmentDownloadProgress),
     Stop,
 }
 
 #[derive(Debug, Clone, Copy)]
-struct SegmentDownloadProgess {
+struct SegmentDownloadProgress {
     offset: u64,
     size: u64,
     progress: u64,
@@ -157,7 +157,7 @@ impl FileSegmentDownloader {
                 self.progress += chunk_bytes.len() as u64;
                 if let Err(err) = tx
                     .send(ProgressManagerCommand::UpdateProgress(
-                        SegmentDownloadProgess {
+                        SegmentDownloadProgress {
                             offset: self.offset,
                             size: self.size,
                             progress: self.progress,
@@ -190,7 +190,7 @@ impl FileSegmentDownloader {
 
 async fn handle_segment_download_progress(
     filename: String,
-    initial_progress: HashMap<u64, SegmentDownloadProgess>,
+    initial_progress: HashMap<u64, SegmentDownloadProgress>,
     mut rx: Receiver<ProgressManagerCommand>,
 ) {
     let progress_filename = format!("{}.dlprogress", filename);
@@ -219,8 +219,8 @@ async fn handle_segment_download_progress(
     }
 }
 
-fn get_progress(filename: &str) -> HashMap<u64, SegmentDownloadProgess> {
-    let mut progress: HashMap<u64, SegmentDownloadProgess> = HashMap::new();
+fn get_progress(filename: &str) -> HashMap<u64, SegmentDownloadProgress> {
+    let mut progress: HashMap<u64, SegmentDownloadProgress> = HashMap::new();
     let progress_filename = format!("{}.dlprogress", filename);
     for line in std::fs::read_to_string(progress_filename)
         .unwrap_or(String::new())
@@ -244,7 +244,7 @@ fn get_progress(filename: &str) -> HashMap<u64, SegmentDownloadProgess> {
         }
         progress.insert(
             line_parsed[0].clone().unwrap(),
-            SegmentDownloadProgess {
+            SegmentDownloadProgress {
                 offset: line_parsed[0].clone().unwrap(),
                 size: line_parsed[1].clone().unwrap(),
                 progress: line_parsed[2].clone().unwrap(),
@@ -342,7 +342,7 @@ async fn download_file(
             } else {
                 progress.insert(
                     segment_start,
-                    SegmentDownloadProgess {
+                    SegmentDownloadProgress {
                         offset: segment_start,
                         size: segment_end - segment_start + 1,
                         progress: 0,

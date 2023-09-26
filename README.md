@@ -4,6 +4,9 @@
 
 A simple, blazingly fast download accelerator (written in Rust).
 
+![image](https://github.com/WarrenHood/HoodDL/assets/18058977/8852ff4e-3020-496d-9629-835b5bcaa02d)
+
+
 ## Features
 
 - Configurable number of connections to be used when downloading files.

@@ -1,5 +1,5 @@
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use clap::Parser;
@@ -37,6 +37,18 @@ struct Args {
     /// The concurrent target total size of all chunks (MB)
     #[arg(short, long, default_value_t = 20.0)]
     target_total_chunk_size: f64,
+
+    /// Timeout in seconds before retrying a chunk download (don't set this too low)
+    #[arg(long, default_value_t = 15)]
+    chunk_retry_timeout: u64,
+
+    /// Chunk retry delay in seconds
+    #[arg(long, default_value_t = 5)]
+    chunk_retry_delay: u64,
+
+    /// Create a new client every time we make a request
+    #[arg(long, default_value_t = true)]
+    new_client_per_request: bool,
 }
 
 #[derive(Debug, SmartDefault, Clone)]
@@ -45,6 +57,9 @@ struct DownloadOptions {
     chunk_size: u64,
     cookies: Vec<String>,
     _headers: Vec<(String, String)>,
+    retry_timeout: u64,
+    retry_delay: u64,
+    new_client_per_request: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -125,7 +140,7 @@ impl FileSegmentDownloader {
         for cookie in self.options.cookies.iter() {
             cookie_jar.add_cookie_str(cookie, &self.url.parse()?);
         }
-        let client = reqwest::ClientBuilder::new()
+        let mut client = reqwest::ClientBuilder::new()
             .cookie_store(true)
             .cookie_provider(cookie_jar.into())
             .build()?;
@@ -141,39 +156,57 @@ impl FileSegmentDownloader {
                 continue;
             }
             let chunk_end = (chunk_start + self.options.chunk_size - 1).clamp(0, end_pos);
-            if let Ok(chunk_response) = client
-                .get(&self.url)
-                .header(
-                    reqwest::header::RANGE,
-                    format!("bytes={}-{}", chunk_start, chunk_end),
-                )
-                .send()
-                .await
-            {
-                file.seek(std::io::SeekFrom::Start(chunk_start)).await?;
-                let chunk_bytes = chunk_response.bytes().await?;
-                file.write_all(&chunk_bytes).await?;
-                file.flush().await?;
-                self.progress += chunk_bytes.len() as u64;
-                if let Err(err) = tx
-                    .send(ProgressManagerCommand::UpdateProgress(
-                        SegmentDownloadProgress {
-                            offset: self.offset,
-                            size: self.size,
-                            progress: self.progress,
-                        },
-                    ))
+            loop {
+                if let Ok(chunk_response) = client
+                    .get(&self.url)
+                    .header(
+                        reqwest::header::RANGE,
+                        format!("bytes={}-{}", chunk_start, chunk_end),
+                    )
+                    .timeout(Duration::from_secs(self.options.retry_timeout))
+                    .send()
                     .await
                 {
-                    eprintln!(
-                        "Failed to send progress update for segment {}-{}: {:?}",
-                        self.offset,
-                        self.offset + self.size - 1,
-                        err
-                    );
-                }
-                if let Some(pb) = &progress_bar {
-                    pb.set_position(self.progress);
+                    file.seek(std::io::SeekFrom::Start(chunk_start)).await?;
+                    if self.options.new_client_per_request {
+                        // Create a new client so the server doesn't try to throttle us
+                        let cookie_jar = cookie::Jar::default();
+                        for cookie in self.options.cookies.iter() {
+                            cookie_jar.add_cookie_str(cookie, &self.url.parse()?);
+                        }
+                        client = reqwest::ClientBuilder::new()
+                            .cookie_store(true)
+                            .cookie_provider(cookie_jar.into())
+                            .build()?;
+                    }
+                    if let Ok(chunk_bytes) = chunk_response.bytes().await {
+                        file.write_all(&chunk_bytes).await?;
+                        file.flush().await?;
+                        self.progress += chunk_bytes.len() as u64;
+                        if let Err(err) = tx
+                            .send(ProgressManagerCommand::UpdateProgress(
+                                SegmentDownloadProgress {
+                                    offset: self.offset,
+                                    size: self.size,
+                                    progress: self.progress,
+                                },
+                            ))
+                            .await
+                        {
+                            eprintln!(
+                                "Failed to send progress update for segment {}-{}: {:?}",
+                                self.offset,
+                                self.offset + self.size - 1,
+                                err
+                            );
+                        }
+                        if let Some(pb) = &progress_bar {
+                            pb.set_position(self.progress);
+                        }
+                        break;
+                    }
+                } else {
+                    tokio::time::sleep(Duration::from_secs(self.options.retry_delay)).await;
                 }
             }
         }
@@ -319,7 +352,6 @@ async fn download_file(
             file.flush().await?;
         }
 
-
         let mut downloaders = Vec::new();
         for segment_start in segments {
             let segment_end = (segment_start + segment_size - 1).clamp(0, content_length - 1);
@@ -441,6 +473,9 @@ async fn main() -> Result<()> {
                 .ceil() as u64,
             cookies: args.cookies,
             _headers: Vec::new(),
+            retry_timeout: args.chunk_retry_timeout,
+            retry_delay: args.chunk_retry_delay,
+            new_client_per_request: args.new_client_per_request,
         },
     )
     .await?;

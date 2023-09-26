@@ -27,7 +27,7 @@ struct Args {
     filename: Option<String>,
 
     /// Number of connections to use
-    #[arg(short, long, default_value_t = 4)]
+    #[arg(short, long, default_value_t = 8)]
     num_connections: u64,
 
     /// Cookies to use with the download requests
@@ -116,11 +116,11 @@ impl FileSegmentDownloader {
         }
 
         let mut file = tokio::fs::File::options()
-                    .read(true)
-                    .write(true)
-                    .create(false)
-                    .open(&self.filename)
-                    .await?;
+            .read(true)
+            .write(true)
+            .create(false)
+            .open(&self.filename)
+            .await?;
         let cookie_jar = cookie::Jar::default();
         for cookie in self.options.cookies.iter() {
             cookie_jar.add_cookie_str(cookie, &self.url.parse()?);
@@ -289,10 +289,14 @@ async fn download_file(
     }
     if let Some(content_length) = response.headers().get(reqwest::header::CONTENT_LENGTH) {
         let content_length: u64 = content_length.to_str()?.parse()?;
-        let (tx, rx) = mpsc::channel::<ProgressManagerCommand>(connections as usize);
+        let (tx, rx) = mpsc::channel::<ProgressManagerCommand>((connections + 1) as usize);
+        let segment_size = (content_length as f64 / connections as f64).ceil() as u64;
+        let segments = (0..=content_length - 1).step_by(segment_size as usize);
+        let connections = segments.clone().count();
         let mut progress = get_progress(&filename);
+        let file_exists = std::fs::metadata(&filename).is_ok();
         let mut is_resumed = false;
-        if progress.len() > 0 {
+        if file_exists && progress.len() == connections {
             is_resumed = true;
             println!("Resuming download for file {}", &filename);
         } else {
@@ -300,6 +304,7 @@ async fn download_file(
                 "Starting download of file {}, connections={}, size is {} bytes",
                 filename, connections, content_length
             );
+            progress.clear();
             let _ = std::fs::remove_file(format!("{}.dlprogress", filename));
             let mut file = tokio::fs::File::options()
                 .read(true)
@@ -314,8 +319,7 @@ async fn download_file(
             file.flush().await?;
         }
 
-        let segment_size = (content_length as f64 / connections as f64).ceil() as u64;
-        let segments = (0..=content_length - 1).step_by(segment_size as usize);
+
         let mut downloaders = Vec::new();
         for segment_start in segments {
             let segment_end = (segment_start + segment_size - 1).clamp(0, content_length - 1);

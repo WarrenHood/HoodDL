@@ -27,8 +27,14 @@ Options:
           Number of connections to use [default: 8]
   -c, --cookies <COOKIES>
           Cookies to use with the download requests
-  -s, --segment-chunk-size <SEGMENT_CHUNK_SIZE>
-          Size of chunk (in bytes) to download at a time per connection [default: 8388608]
+  -t, --target-total-chunk-size <TARGET_TOTAL_CHUNK_SIZE>
+          The concurrent target total size of all chunks (MB) [default: 20]
+      --chunk-retry-timeout <CHUNK_RETRY_TIMEOUT>
+          Timeout in seconds before retrying a chunk download (don't set this too low) [default: 15]
+      --chunk-retry-delay <CHUNK_RETRY_DELAY>
+          Chunk retry delay in seconds [default: 5]
+      --new-client-per-request
+          Create a new client every time we make a request
   -h, --help
           Print help
   -V, --version

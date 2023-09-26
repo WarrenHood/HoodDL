@@ -35,11 +35,11 @@ struct Args {
     #[arg(short, long)]
     cookies: Vec<String>,
 
-    /// The concurrent target total size of all chunks (MB)
+    /// The concurrent target total size of all chunks in MB
     #[arg(short, long, default_value_t = 20.0)]
     target_total_chunk_size: f64,
 
-    /// Timeout in seconds before retrying a chunk download (don't set this too low)
+    /// Timeout in seconds before retrying a chunk download
     #[arg(long, default_value_t = 15)]
     chunk_retry_timeout: u64,
 

@@ -15,7 +15,7 @@ A simple, blazingly fast download accelerator (written in Rust).
 
 Usage:
 
-```bash
+```
 Usage: hooddl [OPTIONS] --url <URL>
 
 Options:
@@ -28,9 +28,9 @@ Options:
   -c, --cookies <COOKIES>
           Cookies to use with the download requests
   -t, --target-total-chunk-size <TARGET_TOTAL_CHUNK_SIZE>
-          The concurrent target total size of all chunks (MB) [default: 20]
+          The concurrent target total size of all chunks in MB [default: 20]
       --chunk-retry-timeout <CHUNK_RETRY_TIMEOUT>
-          Timeout in seconds before retrying a chunk download (don't set this too low) [default: 15]
+          Timeout in seconds before retrying a chunk download [default: 15]
       --chunk-retry-delay <CHUNK_RETRY_DELAY>
           Chunk retry delay in seconds [default: 5]
       --new-client-per-request

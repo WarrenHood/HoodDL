@@ -27,21 +27,21 @@ struct Args {
     filename: Option<String>,
 
     /// Number of connections to use
-    #[arg(short, long, default_value_t = 8)]
+    #[arg(short, long, default_value_t = 4)]
     num_connections: u64,
 
     /// Cookies to use with the download requests
     #[arg(short, long)]
     cookies: Vec<String>,
 
-    /// Size of chunk (in bytes) to download at a time per connection
-    #[arg(short, long, default_value_t = 8388608)]
-    segment_chunk_size: u64,
+    /// The concurrent target total size of all chunks (MB)
+    #[arg(short, long, default_value_t = 20.0)]
+    target_total_chunk_size: f64,
 }
 
 #[derive(Debug, SmartDefault, Clone)]
 struct DownloadOptions {
-    #[default = 8192]
+    #[default = 1048576]
     chunk_size: u64,
     cookies: Vec<String>,
     _headers: Vec<(String, String)>,
@@ -116,11 +116,11 @@ impl FileSegmentDownloader {
         }
 
         let mut file = tokio::fs::File::options()
-            .read(true)
-            .write(true)
-            .create(false)
-            .open(&self.filename)
-            .await?;
+                    .read(true)
+                    .write(true)
+                    .create(false)
+                    .open(&self.filename)
+                    .await?;
         let cookie_jar = cookie::Jar::default();
         for cookie in self.options.cookies.iter() {
             cookie_jar.add_cookie_str(cookie, &self.url.parse()?);
@@ -152,7 +152,7 @@ impl FileSegmentDownloader {
             {
                 file.seek(std::io::SeekFrom::Start(chunk_start)).await?;
                 let chunk_bytes = chunk_response.bytes().await?;
-                file.write(&chunk_bytes).await?;
+                file.write_all(&chunk_bytes).await?;
                 file.flush().await?;
                 self.progress += chunk_bytes.len() as u64;
                 if let Err(err) = tx
@@ -292,7 +292,7 @@ async fn download_file(
         let (tx, rx) = mpsc::channel::<ProgressManagerCommand>(connections as usize);
         let mut progress = get_progress(&filename);
         let mut is_resumed = false;
-        if progress.len() as u64 == connections {
+        if progress.len() > 0 {
             is_resumed = true;
             println!("Resuming download for file {}", &filename);
         } else {
@@ -417,12 +417,24 @@ async fn download_file(
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    if args.num_connections < 1 {
+        return Err(anyhow::format_err!(
+            "Number of connections cannot be less than 1"
+        ));
+    }
+    if args.target_total_chunk_size < 0.01 {
+        return Err(anyhow::format_err!(
+            "Target total chunk size should be at least 0.01"
+        ));
+    }
     download_file(
         args.filename.as_deref(),
         &args.url,
         args.num_connections,
         &DownloadOptions {
-            chunk_size: args.segment_chunk_size,
+            chunk_size: (args.target_total_chunk_size * 1024.0 * 1024.0
+                / args.num_connections as f64)
+                .ceil() as u64,
             cookies: args.cookies,
             _headers: Vec::new(),
         },

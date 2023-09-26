@@ -1,4 +1,5 @@
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use regex::Regex;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::Result;
@@ -287,15 +288,43 @@ fn get_progress(filename: &str) -> HashMap<u64, SegmentDownloadProgress> {
     progress
 }
 
+async fn get_filename_from_url(url: &str) -> Option<String> {
+    // Attempt to get the filename
+    let c = reqwest::Client::new();
+    if let Ok(result) = c.head(url).send().await {
+        let headers = result.headers();
+        if let Some(content_disposition) = headers.get("Content-Disposition") {
+            if let Ok(content_disposition) = content_disposition.to_str() {
+                let re = Regex::new(r#"filename=['"]?([^'"]+)['"]?"#).unwrap();
+                if let Some(captures) = re.captures(content_disposition) {
+                    if captures.len() > 1 {
+                        // Ensure there are no slashes in the filename...
+                        let filename = captures[1].replace("/", "_").replace("\\", "_");
+                        println!("Detected filename from Content-Disposition: {}", filename);
+                        return Some(filename);
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(filename) = url.split('/').last() {
+        if let Some(filename) = filename.split('?').nth(0) {
+            return Some(filename.into());
+        }
+    }
+    None
+}
+
 async fn download_file(
-    filename: Option<&str>,
+    filename: Option<String>,
     url: &str,
     connections: u64,
     options: &DownloadOptions,
 ) -> Result<()> {
-    let mut filename = filename;
+    let mut filename: Option<String> = filename;
     if filename.is_none() {
-        filename = url.split("/").last();
+        filename = get_filename_from_url(url).await;
     }
     if filename.is_none() {
         return Err(anyhow::format_err!("Please provide a filename"));
@@ -358,7 +387,7 @@ async fn download_file(
             if is_resumed {
                 downloaders.push(Arc::new(Mutex::new(
                     FileSegmentDownloader::new_with_progress(
-                        filename,
+                        &filename,
                         url,
                         segment_start,
                         segment_end - segment_start + 1,
@@ -385,7 +414,7 @@ async fn download_file(
                     },
                 );
                 downloaders.push(Arc::new(Mutex::new(FileSegmentDownloader::new(
-                    filename,
+                    &filename,
                     url,
                     segment_start,
                     segment_end - segment_start + 1,
@@ -394,7 +423,7 @@ async fn download_file(
             }
         }
         let progress_manager = tokio::spawn(handle_segment_download_progress(
-            filename.into(),
+            filename.clone(),
             progress.clone(),
             rx,
         ));
@@ -446,7 +475,7 @@ async fn download_file(
             "Couldn't get content length. Aborting..."
         ));
     }
-    let _ = std::fs::remove_file(format!("{}.dlprogress", filename));
+    let _ = std::fs::remove_file(format!("{}.dlprogress", &filename));
     Ok(())
 }
 
@@ -464,7 +493,7 @@ async fn main() -> Result<()> {
         ));
     }
     download_file(
-        args.filename.as_deref(),
+        args.filename,
         &args.url,
         args.num_connections,
         &DownloadOptions {

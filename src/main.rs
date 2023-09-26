@@ -47,9 +47,9 @@ struct Args {
     #[arg(long, default_value_t = 5)]
     chunk_retry_delay: u64,
 
-    /// Create a new client every time we make a request
-    #[arg(long, default_value_t = true)]
-    new_client_per_request: bool,
+    /// Do not create a new client every time we make a request
+    #[arg(long, default_value_t = false)]
+    no_new_client_per_request: bool,
 }
 
 #[derive(Debug, SmartDefault, Clone)]
@@ -504,7 +504,7 @@ async fn main() -> Result<()> {
             _headers: Vec::new(),
             retry_timeout: args.chunk_retry_timeout,
             retry_delay: args.chunk_retry_delay,
-            new_client_per_request: args.new_client_per_request,
+            new_client_per_request: !args.no_new_client_per_request,
         },
     )
     .await?;

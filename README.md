@@ -11,7 +11,7 @@ A simple, blazingly fast download accelerator (written in Rust).
 - Progress bar for each segment/connection.
 - Cancelled/failed downloads can be resumed if you specify the same number of connections as in the previous attempt
 - Setting cookies
-- Configurable download chunk size in bytes for each connection (defaults to 8388608 bytes ie. 8MB)
+- Configurable total concurrent chunk download size in MB
 
 Usage:
 
@@ -33,8 +33,8 @@ Options:
           Timeout in seconds before retrying a chunk download [default: 15]
       --chunk-retry-delay <CHUNK_RETRY_DELAY>
           Chunk retry delay in seconds [default: 5]
-      --new-client-per-request
-          Create a new client every time we make a request
+      --no-new-client-per-request
+          Do not create a new client every time we make a request
   -h, --help
           Print help
   -V, --version
